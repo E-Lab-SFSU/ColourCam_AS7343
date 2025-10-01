@@ -1,5 +1,5 @@
 # as7343_plot.py
-# Live bar-graph plot of AS7343 channels with reflectance + transmission modes,
+# Live bar-graph plot of AS7343 channels with reflectance + transmission (ABS_TX) modes,
 # plus %T display in ABS_TX (absorbance/transmission) mode.
 
 import sys, time, math
@@ -23,11 +23,11 @@ ALPHA       = 0.30
 UPDATE_MS   = 100
 
 # ---- Display/calibration ----
-MODE = "RAW"               # "RAW", "REFLECTANCE", "ABSORBANCE", "TRANS", "ABS_TX"
+MODE = "RAW"               # "RAW", "REFLECTANCE", "ABSORBANCE", "ABS_TX"
 EPS  = 1e-9
 dark_ref   = None
 white_ref  = None
-blank_ref  = None
+blank_ref  = None          # transmission blank (I0) for ABS_TX
 LED_IS_ON  = False
 
 # ---- Optional timing knobs for better dark capture ----
@@ -111,12 +111,12 @@ def apply_calibration(vals):
     RAW:         raw counts (no dark/white/blank)
     REFLECTANCE: R = (S-D)/(W-D)
     ABSORBANCE:  A* = -log10(R)        [reflectance/log view]
-    TRANS:       T = (I-D)/(I0-D)      [transmittance 0..1]
     ABS_TX:      A = log10((I0-D)/(I-D))  [true transmission absorbance]
     """
     global dark_ref, white_ref, blank_ref, MODE
     if MODE == "RAW":
         return vals
+
     if MODE in ("REFLECTANCE", "ABSORBANCE"):
         if dark_ref is not None:
             vals = [max(v - d, EPS) for v, d in zip(vals, dark_ref)]
@@ -128,13 +128,12 @@ def apply_calibration(vals):
             return R
         else:
             return [ -math.log10(max(r, EPS)) for r in R ]
-    if MODE in ("TRANS", "ABS_TX") and blank_ref is not None:
+
+    if MODE == "ABS_TX" and blank_ref is not None:
         I  = [max(v  - (dark_ref[i] if dark_ref else 0), EPS) for i, v in enumerate(vals)]
         I0 = [max(bv - (dark_ref[i] if dark_ref else 0), EPS) for i, bv in enumerate(blank_ref)]
-        if MODE == "TRANS":
-            return [ Ik / I0k for Ik, I0k in zip(I, I0) ]
-        else:
-            return [ math.log10(I0k / Ik) for I0k, Ik in zip(I0, I) ]
+        return [ math.log10(I0k / Ik) for I0k, Ik in zip(I0, I) ]
+
     return vals
 
 def main():
@@ -142,9 +141,17 @@ def main():
 
     fig, ax = plt.subplots(figsize=(10,4))
     bars = ax.bar(LABELS, [0]*len(LABELS))
+
     # Secondary y-axis for %T (visible only in ABS_TX)
-    A_to_pct = lambda A: 100.0 * (10.0 ** (-np.array(A)))
-    pct_to_A = lambda pct: -np.log10(np.array(pct) / 100.0)
+    EPS_PCT = 1e-3  # 0.001% floor to avoid log10(0)
+    def A_to_pct(A):
+        A = np.array(A, dtype=float)
+        pct = 100.0 * np.power(10.0, -A)     # %T = 100 * 10^(-A)
+        return np.clip(pct, EPS_PCT, 1e6)    # allow >100% if mis-blank
+    def pct_to_A(pct):
+        pct = np.array(pct, dtype=float)
+        pct = np.clip(pct, EPS_PCT, 1e6)
+        return -np.log10(pct / 100.0)
     secax = ax.secondary_yaxis('right', functions=(A_to_pct, pct_to_A))
     secax.set_ylabel('%T')
     secax.set_visible(False)
@@ -161,24 +168,35 @@ def main():
             ax.set_ylim(0, 1.2)
         elif MODE == "ABSORBANCE":
             ax.set_ylim(0, 2.0)
-        elif MODE == "TRANS":
-            ax.set_ylim(0, 1.2)
         else:  # ABS_TX
             ax.set_ylim(-0.2, 2.0)  # allow small negative A to debug blanks
         ax.set_autoscale_on(False)
         secax.set_visible(MODE == "ABS_TX")
 
+    def set_labels_for_mode():
+        if MODE == "RAW":
+            ax.set_ylabel("Counts")
+        elif MODE == "REFLECTANCE":
+            ax.set_ylabel("Reflectance (R)")
+        elif MODE == "ABSORBANCE":
+            ax.set_ylabel("A* = −log10(R)")
+        else:  # ABS_TX
+            ax.set_ylabel("Absorbance (A)")
+
+    # initial labels/limits/title
     set_ylim_for_mode()
-    ax.set_ylabel("Counts / Ratio / A")
+    set_labels_for_mode()
     ax.set_title(f"AS7343 Live Channels — Mode: {MODE}")
     plt.tight_layout()
 
     def on_key(event):
         global dark_ref, white_ref, blank_ref, MODE, LED_IS_ON
-        if event.key in ("q", "escape"):
+        key = (event.key or "").lower()
+
+        if key in ("q", "escape"):
             plt.close(event.canvas.figure)
 
-        elif event.key == "d":
+        elif key == "d":
             prev = LED_IS_ON
             led_set(sensor, False); LED_IS_ON = False
             time.sleep(DARK_LED_SETTLE_MS / 1000.0)
@@ -188,21 +206,21 @@ def main():
             print(f"[cal] Dark captured (LED off {DARK_LED_SETTLE_MS} ms).")
             led_set(sensor, prev); LED_IS_ON = prev
 
-        elif event.key == "w":
+        elif key == "w":
             if USE_LED and not LED_IS_ON:
                 led_set(sensor, True); LED_IS_ON = True
                 time.sleep(WHITE_LED_SETTLE_MS / 1000.0)
             white_ref = read_values_stacked(sensor, SAMPLES)
             print("[cal] White captured (LED on).")
 
-        elif event.key == "b":
+        elif key == "b":
             if USE_LED and not LED_IS_ON:
                 led_set(sensor, True); LED_IS_ON = True
                 time.sleep(WHITE_LED_SETTLE_MS / 1000.0)
             blank_ref = read_values_stacked(sensor, SAMPLES)
             print("[cal] Blank captured (LED on).")
 
-        elif event.key == "m":
+        elif key == "m":
             MODE = {
                 "RAW":"REFLECTANCE",
                 "REFLECTANCE":"ABSORBANCE",
@@ -211,14 +229,15 @@ def main():
             }[MODE]
             print(f"[view] Mode -> {MODE}")
             set_ylim_for_mode()
-            ax.figure.canvas.draw_idle()
+            set_labels_for_mode()
+            ax.set_title(f"AS7343 Live Channels — Mode: {MODE}")
+            fig.canvas.draw_idle()
 
     fig.canvas.mpl_connect("key_press_event", on_key)
 
     ema = [0.0]*len(LABELS)
 
     def fmt_pct(p):
-        # Clamp for display; show <0.1% for tiny values
         if p < 0.05: return "<0.1%"
         if p > 999.5: return ">999%"
         return f"{p:.1f}%"
@@ -233,12 +252,22 @@ def main():
         for b, v in zip(bars, ema):
             b.set_height(v)
 
-        # Show %T labels only in ABS_TX (A -> %T)
+        # ABS_TX: headroom + %T labels
         if MODE == "ABS_TX":
+            ymin, ymax = ax.get_ylim()
+            maxA = max(ema) if ema else 0.0
+            if maxA > 0.95 * ymax:
+                new_top = max(2.0, maxA * 1.15)
+                ax.set_ylim(ymin, new_top)
+                ymin, ymax = ymin, new_top
             pct = A_to_pct(ema)
-            for b, t, p in zip(bars, pct_labels, pct):
+            pad = 0.02 * (ymax - ymin)
+            for b, t, p, A in zip(bars, pct_labels, pct, ema):
+                y_top = min(A, ymax - pad)
+                y_bot = max(y_top, ymin + pad)
                 t.set_text(fmt_pct(float(p)))
-                t.set_position((b.get_x() + b.get_width()/2.0, b.get_height()))
+                t.set_position((b.get_x() + b.get_width()/2.0, y_bot))
+                t.set_va('bottom' if A < ymax - pad else 'top')
                 t.set_visible(True)
             secax.set_visible(True)
         else:
@@ -246,10 +275,11 @@ def main():
                 t.set_visible(False)
             secax.set_visible(False)
 
+        # keep title in sync even if something else changes MODE
         ax.set_title(f"AS7343 Live Channels — Mode: {MODE}")
-        return bars + pct_labels
+        return list(bars) + pct_labels
 
-    ani = FuncAnimation(fig, update, interval=UPDATE_MS, blit=False)
+    ani = FuncAnimation(fig, update, interval=UPDATE_MS, blit=False, cache_frame_data=False)
 
     try:
         plt.show()
