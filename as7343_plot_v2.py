@@ -1,7 +1,9 @@
-# as7343_plot_v2.py
-# Live bar-graph plot of AS7343 channels with reflectance + transmission modes.
+# as7343_plot.py
+# Live bar-graph plot of AS7343 channels with reflectance + transmission modes,
+# plus %T display in ABS_TX (absorbance/transmission) mode.
 
 import sys, time, math
+import numpy as np
 import qwiic_as7343
 import matplotlib
 matplotlib.use("TkAgg")  # GUI backend suitable for Pi
@@ -14,62 +16,51 @@ LABELS = ["F1\n(405nm)","F2\n(425nm)","FZ\n(450nm)","F3\n(475nm)","F4\n(515nm)",
 
 # ---- Sensitivity knobs ----
 GAIN_CHOICE = "kAgain32"   # try: kAgain128, kAgain256, kAgain512
-USE_LED     = True         # set False if your board has no LED
-LED_DRIVE   = 1            # higher index = more current (board-dependent)
-SAMPLES     = 1            # stack N frames per plotted update (boosts counts & SNR)
-ALPHA       = 0.30         # EMA smoothing (0..1); higher = snappier
-UPDATE_MS   = 100          # ~10 Hz UI update
+USE_LED     = True
+LED_DRIVE   = 1
+SAMPLES     = 1
+ALPHA       = 0.30
+UPDATE_MS   = 100
 
 # ---- Display/calibration ----
-MODE = "RAW"               # "RAW", "REFLECTANCE", "ABSORBANCE", "ABS_TX"
+MODE = "RAW"               # "RAW", "REFLECTANCE", "ABSORBANCE", "TRANS", "ABS_TX"
 EPS  = 1e-9
-dark_ref   = None          # for dark correction
-white_ref  = None          # reflectance white reference
-blank_ref  = None          # transmission blank (I0)
-LED_IS_ON  = False         # track LED state we set
+dark_ref   = None
+white_ref  = None
+blank_ref  = None
+LED_IS_ON  = False
 
-# ---------- LED helpers ----------
+# ---- Optional timing knobs for better dark capture ----
+DARK_LED_SETTLE_MS  = 800
+DARK_FLUSH_FRAMES   = 2
+WHITE_LED_SETTLE_MS = 150
+
 def led_set(sensor, on):
-    if not USE_LED:
-        return
+    if not USE_LED: return
     try:
-        if on:
-            sensor.set_led_on()
-        else:
-            sensor.set_led_off()
+        sensor.set_led_on() if on else sensor.set_led_off()
     except Exception:
         pass
 
-# ---------- Sensor setup ----------
 def init_sensor():
     global LED_IS_ON
     s = qwiic_as7343.QwiicAS7343()
     if not s.is_connected() or not s.begin():
         print("AS7343 not detected/failed to begin.", file=sys.stderr); sys.exit(1)
     s.power_on()
-
-    # Gain (robust across driver variants)
     try:
         s.set_a_gain(getattr(s, GAIN_CHOICE))
     except Exception:
-        try:
-            s.set_a_gain(256)  # some builds accept raw integer
-        except Exception:
-            pass
-
-    # Optional: integration/exposure (may not exist in all versions)
+        try: s.set_a_gain(256)
+        except Exception: pass
     for setter, val in (
-        ("set_integration_time_us", 20000), # 20 ms if supported
-        ("set_measurement_time_ms", 50),    # total frame time if supported
-        ("set_atime", 100),                 # coarse
-        ("set_astep", 999),                 # fine
+        ("set_integration_time_us", 20000),
+        ("set_measurement_time_ms", 50),
+        ("set_atime", 100),
+        ("set_astep", 999),
     ):
-        try:
-            getattr(s, setter)(val)
-        except Exception:
-            pass
-
-    # LED baseline state
+        try: getattr(s, setter)(val)
+        except Exception: pass
     if USE_LED:
         try:
             s.set_led_drive(LED_DRIVE)
@@ -79,16 +70,13 @@ def init_sensor():
             LED_IS_ON = False
     else:
         LED_IS_ON = False
-
     if not s.set_auto_smux(s.kAutoSmux18Channels):
         print("Failed to set AutoSMUX=18.", file=sys.stderr); sys.exit(1)
     if not s.spectral_measurement_enable():
         print("Failed to enable spectral measurements.", file=sys.stderr); sys.exit(1)
     return s
 
-# ---------- Read one frame ----------
 def read_frame(sensor):
-    # Channel constants once (fast)
     F1   = sensor.kChPurpleF1405nm
     F2   = sensor.kChDarkBlueF2425nm
     FZ   = sensor.kChBlueFz450nm
@@ -102,23 +90,12 @@ def read_frame(sensor):
     F8   = sensor.kChDarkRedF8745nm
     VIS1 = sensor.kChVis1
     NIR  = sensor.kChNir855nm
-
     sensor.read_all_spectral_data()
-
-    # Values match LABELS order exactly
     return [
-        sensor.get_data(F1),
-        sensor.get_data(F2),
-        sensor.get_data(FZ),
-        sensor.get_data(F3),
-        sensor.get_data(F4),
-        sensor.get_data(FY),
-        sensor.get_data(F5),
-        sensor.get_data(FXL),
-        sensor.get_data(F6),
-        sensor.get_data(F7),
-        sensor.get_data(F8),
-        sensor.get_data(VIS1),
+        sensor.get_data(F1),  sensor.get_data(F2),  sensor.get_data(FZ),
+        sensor.get_data(F3),  sensor.get_data(F4),  sensor.get_data(FY),
+        sensor.get_data(F5),  sensor.get_data(FXL), sensor.get_data(F6),
+        sensor.get_data(F7),  sensor.get_data(F8),  sensor.get_data(VIS1),
         sensor.get_data(NIR),
     ]
 
@@ -129,48 +106,53 @@ def read_values_stacked(sensor, samples=SAMPLES):
         acc = [a+v for a, v in zip(acc, frame)]
     return acc
 
-# ---------- Calibration / display pipeline ----------
 def apply_calibration(vals):
     """
-    RAW:        returns raw counts (no dark/white/blank applied)
+    RAW:         raw counts (no dark/white/blank)
     REFLECTANCE: R = (S-D)/(W-D)
-    ABSORBANCE:  A* = -log10(R)  [from reflectance, not true transmission]
-    ABS_TX:      A  = log10((I0-D)/(I-D))  [true transmission absorbance]
+    ABSORBANCE:  A* = -log10(R)        [reflectance/log view]
+    TRANS:       T = (I-D)/(I0-D)      [transmittance 0..1]
+    ABS_TX:      A = log10((I0-D)/(I-D))  [true transmission absorbance]
     """
     global dark_ref, white_ref, blank_ref, MODE
-
     if MODE == "RAW":
-        return vals  # truly raw in this version
-
-    # Reflectance modes use white
+        return vals
     if MODE in ("REFLECTANCE", "ABSORBANCE"):
-        # dark-correct sample
         if dark_ref is not None:
             vals = [max(v - d, EPS) for v, d in zip(vals, dark_ref)]
         if white_ref is None:
             return vals
-        # dark-correct white
         w = [max(wv - (dark_ref[i] if dark_ref else 0), EPS) for i, wv in enumerate(white_ref)]
         R = [v / wv for v, wv in zip(vals, w)]
         if MODE == "REFLECTANCE":
             return R
         else:
-            return [max(0.0, -math.log10(max(r, EPS))) for r in R]
-
-    # Transmission absorbance (UV–Vis style) uses blank
-    if MODE == "ABS_TX" and blank_ref is not None:
+            return [ -math.log10(max(r, EPS)) for r in R ]
+    if MODE in ("TRANS", "ABS_TX") and blank_ref is not None:
         I  = [max(v  - (dark_ref[i] if dark_ref else 0), EPS) for i, v in enumerate(vals)]
         I0 = [max(bv - (dark_ref[i] if dark_ref else 0), EPS) for i, bv in enumerate(blank_ref)]
-        return [max(0.0, math.log10(I0k / Ik)) for I0k, Ik in zip(I0, I)]
-
+        if MODE == "TRANS":
+            return [ Ik / I0k for Ik, I0k in zip(I, I0) ]
+        else:
+            return [ math.log10(I0k / Ik) for I0k, Ik in zip(I0, I) ]
     return vals
 
-# ---------- Main / UI ----------
 def main():
     sensor = init_sensor()
 
     fig, ax = plt.subplots(figsize=(10,4))
     bars = ax.bar(LABELS, [0]*len(LABELS))
+    # Secondary y-axis for %T (visible only in ABS_TX)
+    A_to_pct = lambda A: 100.0 * (10.0 ** (-np.array(A)))
+    pct_to_A = lambda pct: -np.log10(np.array(pct) / 100.0)
+    secax = ax.secondary_yaxis('right', functions=(A_to_pct, pct_to_A))
+    secax.set_ylabel('%T')
+    secax.set_visible(False)
+
+    # %T labels above bars (visible only in ABS_TX)
+    pct_labels = [ax.text(b.get_x()+b.get_width()/2, 0, "", ha='center',
+                          va='bottom', fontsize=8, rotation=0, visible=False)
+                  for b in bars]
 
     def set_ylim_for_mode():
         if MODE == "RAW":
@@ -179,47 +161,48 @@ def main():
             ax.set_ylim(0, 1.2)
         elif MODE == "ABSORBANCE":
             ax.set_ylim(0, 2.0)
+        elif MODE == "TRANS":
+            ax.set_ylim(0, 1.2)
         else:  # ABS_TX
-            ax.set_ylim(0, 2.0)
+            ax.set_ylim(-0.2, 2.0)  # allow small negative A to debug blanks
         ax.set_autoscale_on(False)
+        secax.set_visible(MODE == "ABS_TX")
 
     set_ylim_for_mode()
     ax.set_ylabel("Counts / Ratio / A")
     ax.set_title(f"AS7343 Live Channels — Mode: {MODE}")
     plt.tight_layout()
 
-    # Key bindings
     def on_key(event):
         global dark_ref, white_ref, blank_ref, MODE, LED_IS_ON
         if event.key in ("q", "escape"):
             plt.close(event.canvas.figure)
 
-        elif event.key == "d":  # DARK capture (LED off)
+        elif event.key == "d":
             prev = LED_IS_ON
             led_set(sensor, False); LED_IS_ON = False
-            time.sleep(0.1)
-            vals = read_values_stacked(sensor, SAMPLES)
-            dark_ref = vals[:]
-            print("[cal] Dark captured (LED off).")
+            time.sleep(DARK_LED_SETTLE_MS / 1000.0)
+            for _ in range(DARK_FLUSH_FRAMES):
+                _ = read_frame(sensor); time.sleep(0.01)
+            dark_ref = read_values_stacked(sensor, SAMPLES)
+            print(f"[cal] Dark captured (LED off {DARK_LED_SETTLE_MS} ms).")
             led_set(sensor, prev); LED_IS_ON = prev
 
-        elif event.key == "w":  # WHITE capture (LED on, reflectance)
+        elif event.key == "w":
             if USE_LED and not LED_IS_ON:
                 led_set(sensor, True); LED_IS_ON = True
-                time.sleep(0.1)
-            vals = read_values_stacked(sensor, SAMPLES)
-            white_ref = vals[:]
+                time.sleep(WHITE_LED_SETTLE_MS / 1000.0)
+            white_ref = read_values_stacked(sensor, SAMPLES)
             print("[cal] White captured (LED on).")
 
-        elif event.key == "b":  # BLANK capture (LED on, transmission)
+        elif event.key == "b":
             if USE_LED and not LED_IS_ON:
                 led_set(sensor, True); LED_IS_ON = True
-                time.sleep(0.1)
-            vals = read_values_stacked(sensor, SAMPLES)
-            blank_ref = vals[:]
+                time.sleep(WHITE_LED_SETTLE_MS / 1000.0)
+            blank_ref = read_values_stacked(sensor, SAMPLES)
             print("[cal] Blank captured (LED on).")
 
-        elif event.key == "m":  # cycle modes
+        elif event.key == "m":
             MODE = {
                 "RAW":"REFLECTANCE",
                 "REFLECTANCE":"ABSORBANCE",
@@ -234,6 +217,12 @@ def main():
 
     ema = [0.0]*len(LABELS)
 
+    def fmt_pct(p):
+        # Clamp for display; show <0.1% for tiny values
+        if p < 0.05: return "<0.1%"
+        if p > 999.5: return ">999%"
+        return f"{p:.1f}%"
+
     def update(_frame):
         nonlocal ema
         vals = read_values_stacked(sensor, SAMPLES)
@@ -244,8 +233,21 @@ def main():
         for b, v in zip(bars, ema):
             b.set_height(v)
 
+        # Show %T labels only in ABS_TX (A -> %T)
+        if MODE == "ABS_TX":
+            pct = A_to_pct(ema)
+            for b, t, p in zip(bars, pct_labels, pct):
+                t.set_text(fmt_pct(float(p)))
+                t.set_position((b.get_x() + b.get_width()/2.0, b.get_height()))
+                t.set_visible(True)
+            secax.set_visible(True)
+        else:
+            for t in pct_labels:
+                t.set_visible(False)
+            secax.set_visible(False)
+
         ax.set_title(f"AS7343 Live Channels — Mode: {MODE}")
-        return bars
+        return bars + pct_labels
 
     ani = FuncAnimation(fig, update, interval=UPDATE_MS, blit=False)
 
