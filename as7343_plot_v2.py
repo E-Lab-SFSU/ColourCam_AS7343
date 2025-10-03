@@ -179,14 +179,14 @@ def main():
         elif MODE == "REFLECTANCE":
             ax.set_ylabel("Reflectance (R)")
         elif MODE == "ABSORBANCE":
-            ax.set_ylabel("A* = −log10(R)")
+            ax.set_ylabel("A* = âˆ’log10(R)")
         else:  # ABS_TX
             ax.set_ylabel("Absorbance (A)")
 
     # initial labels/limits/title
     set_ylim_for_mode()
     set_labels_for_mode()
-    ax.set_title(f"AS7343 Live Channels — Mode: {MODE}")
+    ax.set_title(f"AS7343 Live Channels â€” Mode: {MODE}")
     plt.tight_layout()
 
     def on_key(event):
@@ -230,7 +230,7 @@ def main():
             print(f"[view] Mode -> {MODE}")
             set_ylim_for_mode()
             set_labels_for_mode()
-            ax.set_title(f"AS7343 Live Channels — Mode: {MODE}")
+            ax.set_title(f"AS7343 Live Channels â€” Mode: {MODE}")
             fig.canvas.draw_idle()
 
     fig.canvas.mpl_connect("key_press_event", on_key)
@@ -276,7 +276,7 @@ def main():
             secax.set_visible(False)
 
         # keep title in sync even if something else changes MODE
-        ax.set_title(f"AS7343 Live Channels — Mode: {MODE}")
+        ax.set_title(f"AS7343 Live Channels â€” Mode: {MODE}")
         return list(bars) + pct_labels
 
     ani = FuncAnimation(fig, update, interval=UPDATE_MS, blit=False, cache_frame_data=False)
