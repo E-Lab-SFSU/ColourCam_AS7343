@@ -1,39 +1,62 @@
-# as7343_plot.py
-# Live bar-graph plot of AS7343 channels with reflectance + transmission (ABS_TX) modes,
-# plus %T display in ABS_TX (absorbance/transmission) mode.
+# as7343_console.py
+# Console table for AS7343 that shows percent values per channel
+# and lets you toggle REFLECTANCE (%R), ABS_TX (A & %T via Beer–Lambert),
+# and ABSORBANCE (A* from reflectance) modes.
+#
+# Keys:
+#   d = capture Dark (LED off)
+#   w = capture White (LED on)
+#   b = capture Blank I0 (LED on)
+#   m = cycle mode (REFLECTANCE -> ABS_TX -> ABSORBANCE -> ...)
+#   q = quit
+#
+# Beer–Lambert (for ABS_TX / UV-Vis comparison):
+#   A = log10(I0 / I)
+#   %T = 100 * 10^(-A)
 
-import sys, time, math
+import sys, time, math, threading, queue
 import numpy as np
 import qwiic_as7343
-import matplotlib
-matplotlib.use("TkAgg")  # GUI backend suitable for Pi
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
 
-LABELS = ["F1\n(405nm)","F2\n(425nm)","FZ\n(450nm)","F3\n(475nm)","F4\n(515nm)",
-          "FY\n(550nm)","F5\n(555nm)","FXL\n(600nm)","F6\n(640nm)","F7\n(690nm)",
-          "F8\n(745nm)","VIS\n(396-\n766nm)","NIR\n(855nm)"]
+LABELS = [
+    "F1 405", "F2 425", "FZ 450", "F3 475", "F4 515",
+    "FY 550", "F5 555", "FXL 600", "F6 640", "F7 690",
+    "F8 745", "VIS", "NIR 855"
+]
 
 # ---- Sensitivity knobs ----
-GAIN_CHOICE = "kAgain32"   # try: kAgain128, kAgain256, kAgain512
+GAIN_CHOICE = "kAgain32"    # try: kAgain128, kAgain256, kAgain512
 USE_LED     = True
 LED_DRIVE   = 1
 SAMPLES     = 1
-ALPHA       = 0.30
-UPDATE_MS   = 100
+ALPHA       = 0.30          # EMA smoothing on computed values
+UPDATE_MS   = 150
 
 # ---- Display/calibration ----
-MODE = "RAW"               # "RAW", "REFLECTANCE", "ABSORBANCE", "ABS_TX"
+MODE = "REFLECTANCE"        # "REFLECTANCE", "ABS_TX", "ABSORBANCE"
 EPS  = 1e-9
 dark_ref   = None
 white_ref  = None
-blank_ref  = None          # transmission blank (I0) for ABS_TX
+blank_ref  = None           # transmission blank (I0) for ABS_TX
 LED_IS_ON  = False
 
 # ---- Optional timing knobs for better dark capture ----
 DARK_LED_SETTLE_MS  = 800
 DARK_FLUSH_FRAMES   = 2
 WHITE_LED_SETTLE_MS = 150
+
+# ---- Keyboard input thread ----
+_cmd_q = queue.Queue()
+
+def _stdin_reader():
+    while True:
+        try:
+            s = sys.stdin.readline()
+        except Exception:
+            break
+        if not s:
+            break
+        _cmd_q.put(s.strip().lower())
 
 def led_set(sensor, on):
     if not USE_LED: return
@@ -106,183 +129,145 @@ def read_values_stacked(sensor, samples=SAMPLES):
         acc = [a+v for a, v in zip(acc, frame)]
     return acc
 
-def apply_calibration(vals):
-    """
-    RAW:         raw counts (no dark/white/blank)
-    REFLECTANCE: R = (S-D)/(W-D)
-    ABSORBANCE:  A* = -log10(R)        [reflectance/log view]
-    ABS_TX:      A = log10((I0-D)/(I-D))  [true transmission absorbance]
-    """
-    global dark_ref, white_ref, blank_ref, MODE
-    if MODE == "RAW":
-        return vals
+def compute_reflectance(vals):
+    """R = (S-D)/(W-D) ; returns R and %R"""
+    if dark_ref is not None:
+        vals = [max(v - d, EPS) for v, d in zip(vals, dark_ref)]
+    if white_ref is None:
+        # No white: fall back to raw-ish; avoid div by zero
+        return [0.0]*len(vals), [0.0]*len(vals)
+    w = [max(wv - (dark_ref[i] if dark_ref else 0), EPS) for i, wv in enumerate(white_ref)]
+    R = [max(v / wv, EPS) for v, wv in zip(vals, w)]
+    pctR = [min(1e6, r*100.0) for r in R]
+    return R, pctR
 
-    if MODE in ("REFLECTANCE", "ABSORBANCE"):
-        if dark_ref is not None:
-            vals = [max(v - d, EPS) for v, d in zip(vals, dark_ref)]
-        if white_ref is None:
-            return vals
-        w = [max(wv - (dark_ref[i] if dark_ref else 0), EPS) for i, wv in enumerate(white_ref)]
-        R = [v / wv for v, wv in zip(vals, w)]
-        if MODE == "REFLECTANCE":
-            return R
-        else:
-            return [ -math.log10(max(r, EPS)) for r in R ]
+def compute_abs_tx(vals):
+    """Transmission absorbance via Beer–Lambert:
+       A = log10((I0-D)/(I-D)),  %T = 100 * 10^(-A)"""
+    if blank_ref is None:
+        return [0.0]*len(vals), [0.0]*len(vals)
+    I  = [max(v  - (dark_ref[i] if dark_ref else 0), EPS) for i, v  in enumerate(vals)]
+    I0 = [max(bv - (dark_ref[i] if dark_ref else 0), EPS) for i, bv in enumerate(blank_ref)]
+    A  = [math.log10(I0k / Ik) for I0k, Ik in zip(I0, I)]
+    pctT = [min(1e6, 100.0 * (10.0 ** (-a))) for a in A]
+    return A, pctT
 
-    if MODE == "ABS_TX" and blank_ref is not None:
-        I  = [max(v  - (dark_ref[i] if dark_ref else 0), EPS) for i, v in enumerate(vals)]
-        I0 = [max(bv - (dark_ref[i] if dark_ref else 0), EPS) for i, bv in enumerate(blank_ref)]
-        return [ math.log10(I0k / Ik) for I0k, Ik in zip(I0, I) ]
+def compute_absorbance_from_reflectance(vals):
+    """Log-reflectance view:
+       A* = −log10(R). Also report %R for a percent column."""
+    R, pctR = compute_reflectance(vals)
+    Astar = [-math.log10(max(r, EPS)) for r in R]
+    return Astar, pctR
 
-    return vals
+def fmt_pct(p):
+    if p < 0.05: return "<0.1"
+    if p > 999.5: return ">999"
+    return f"{p:6.1f}"
+
+def fmt_abs(a):
+    # show 2 decimals, allow small negatives for diagnosis
+    return f"{a:5.2f}"
+
+def clear_screen():
+    # ANSI clear
+    sys.stdout.write("\033[2J\033[H")
+    sys.stdout.flush()
+
+def print_header():
+    print("AS7343 Console — Modes: REFLECTANCE (%R) | ABS_TX (A, %T) | ABSORBANCE (A*, %R)")
+    print("Keys: d=Dark  w=White  b=Blank(I0)  m=Mode  q=Quit")
+    cal = []
+    if dark_ref is not None: cal.append("Dark✓")
+    if white_ref is not None: cal.append("White✓")
+    if blank_ref is not None: cal.append("Blank✓")
+    cal_str = ("  Cal: " + ", ".join(cal)) if cal else "  Cal: (none)"
+    led_str = ("LED:on" if LED_IS_ON else "LED:off") if USE_LED else "LED:n/a"
+    print(f"Mode: {MODE}   {led_str}{cal_str}")
+    if MODE == "ABS_TX":
+        print("Beer–Lambert active: A = log10(I0/I),  %T = 100·10^(−A)")
+    print("-"*64)
+
+def print_table(rows, mode):
+    if mode == "REFLECTANCE":
+        print(f"{'Chan':<8} {'%R':>8}")
+        for name, pctR in rows:
+            print(f"{name:<8} {fmt_pct(pctR):>8}")
+    elif mode == "ABS_TX":
+        print(f"{'Chan':<8} {'A':>6} {'%T':>8}")
+        for name, (A, pctT) in rows:
+            print(f"{name:<8} {fmt_abs(A):>6} {fmt_pct(pctT):>8}")
+    else:  # ABSORBANCE (log-reflectance)
+        print(f"{'Chan':<8} {'A*':>6} {'%R':>8}")
+        for name, (Astar, pctR) in rows:
+            print(f"{name:<8} {fmt_abs(Astar):>6} {fmt_pct(pctR):>8}")
+    print("-"*64)
+    print("Tip: capture Dark (d) first, then White (w) for reflectance; for UV-Vis style,"
+          " capture Blank I0 (b) and use ABS_TX.")
 
 def main():
+    global dark_ref, white_ref, blank_ref, MODE, LED_IS_ON
     sensor = init_sensor()
 
-    fig, ax = plt.subplots(figsize=(10,4))
-    bars = ax.bar(LABELS, [0]*len(LABELS))
+    # start stdin reader
+    t = threading.Thread(target=_stdin_reader, daemon=True)
+    t.start()
 
-    # Secondary y-axis for %T (visible only in ABS_TX)
-    EPS_PCT = 1e-3  # 0.001% floor to avoid log10(0)
-    def A_to_pct(A):
-        A = np.array(A, dtype=float)
-        pct = 100.0 * np.power(10.0, -A)     # %T = 100 * 10^(-A)
-        return np.clip(pct, EPS_PCT, 1e6)    # allow >100% if mis-blank
-    def pct_to_A(pct):
-        pct = np.array(pct, dtype=float)
-        pct = np.clip(pct, EPS_PCT, 1e6)
-        return -np.log10(pct / 100.0)
-    secax = ax.secondary_yaxis('right', functions=(A_to_pct, pct_to_A))
-    secax.set_ylabel('%T')
-    secax.set_visible(False)
-
-    # %T labels above bars (visible only in ABS_TX)
-    pct_labels = [ax.text(b.get_x()+b.get_width()/2, 0, "", ha='center',
-                          va='bottom', fontsize=8, rotation=0, visible=False)
-                  for b in bars]
-
-    def set_ylim_for_mode():
-        if MODE == "RAW":
-            ax.set_ylim(0, 500)
-        elif MODE == "REFLECTANCE":
-            ax.set_ylim(0, 1.2)
-        elif MODE == "ABSORBANCE":
-            ax.set_ylim(0, 2.0)
-        else:  # ABS_TX
-            ax.set_ylim(-0.2, 2.0)  # allow small negative A to debug blanks
-        ax.set_autoscale_on(False)
-        secax.set_visible(MODE == "ABS_TX")
-
-    def set_labels_for_mode():
-        if MODE == "RAW":
-            ax.set_ylabel("Counts")
-        elif MODE == "REFLECTANCE":
-            ax.set_ylabel("Reflectance (R)")
-        elif MODE == "ABSORBANCE":
-            ax.set_ylabel("A* = -log10(R)")
-        else:  # ABS_TX
-            ax.set_ylabel("Absorbance (A)")
-
-    # initial labels/limits/title
-    set_ylim_for_mode()
-    set_labels_for_mode()
-    ax.set_title(f"AS7343 Live Channels -â€ Mode: {MODE}")
-    plt.tight_layout()
-
-    def on_key(event):
-        global dark_ref, white_ref, blank_ref, MODE, LED_IS_ON
-        key = (event.key or "").lower()
-
-        if key in ("q", "escape"):
-            plt.close(event.canvas.figure)
-
-        elif key == "d":
-            prev = LED_IS_ON
-            led_set(sensor, False); LED_IS_ON = False
-            time.sleep(DARK_LED_SETTLE_MS / 1000.0)
-            for _ in range(DARK_FLUSH_FRAMES):
-                _ = read_frame(sensor); time.sleep(0.01)
-            dark_ref = read_values_stacked(sensor, SAMPLES)
-            print(f"[cal] Dark captured (LED off {DARK_LED_SETTLE_MS} ms).")
-            led_set(sensor, prev); LED_IS_ON = prev
-
-        elif key == "w":
-            if USE_LED and not LED_IS_ON:
-                led_set(sensor, True); LED_IS_ON = True
-                time.sleep(WHITE_LED_SETTLE_MS / 1000.0)
-            white_ref = read_values_stacked(sensor, SAMPLES)
-            print("[cal] White captured (LED on).")
-
-        elif key == "b":
-            if USE_LED and not LED_IS_ON:
-                led_set(sensor, True); LED_IS_ON = True
-                time.sleep(WHITE_LED_SETTLE_MS / 1000.0)
-            blank_ref = read_values_stacked(sensor, SAMPLES)
-            print("[cal] Blank captured (LED on).")
-
-        elif key == "m":
-            MODE = {
-                "RAW":"REFLECTANCE",
-                "REFLECTANCE":"ABSORBANCE",
-                "ABSORBANCE":"ABS_TX",
-                "ABS_TX":"RAW"
-            }[MODE]
-            print(f"[view] Mode -> {MODE}")
-            set_ylim_for_mode()
-            set_labels_for_mode()
-            ax.set_title(f"AS7343 Live Channels Ã¢â‚¬â€ Mode: {MODE}")
-            fig.canvas.draw_idle()
-
-    fig.canvas.mpl_connect("key_press_event", on_key)
-
-    ema = [0.0]*len(LABELS)
-
-    def fmt_pct(p):
-        if p < 0.05: return "<0.1%"
-        if p > 999.5: return ">999%"
-        return f"{p:.1f}%"
-
-    def update(_frame):
-        nonlocal ema
-        vals = read_values_stacked(sensor, SAMPLES)
-        vals = apply_calibration(vals)
-
-        # EMA smoothing
-        ema = [ALPHA*v + (1-ALPHA)*e for v, e in zip(vals, ema)]
-        for b, v in zip(bars, ema):
-            b.set_height(v)
-
-        # ABS_TX: headroom + %T labels
-        if MODE == "ABS_TX":
-            ymin, ymax = ax.get_ylim()
-            maxA = max(ema) if ema else 0.0
-            if maxA > 0.95 * ymax:
-                new_top = max(2.0, maxA * 1.15)
-                ax.set_ylim(ymin, new_top)
-                ymin, ymax = ymin, new_top
-            pct = A_to_pct(ema)
-            pad = 0.02 * (ymax - ymin)
-            for b, t, p, A in zip(bars, pct_labels, pct, ema):
-                y_top = min(A, ymax - pad)
-                y_bot = max(y_top, ymin + pad)
-                t.set_text(fmt_pct(float(p)))
-                t.set_position((b.get_x() + b.get_width()/2.0, y_bot))
-                t.set_va('bottom' if A < ymax - pad else 'top')
-                t.set_visible(True)
-            secax.set_visible(True)
-        else:
-            for t in pct_labels:
-                t.set_visible(False)
-            secax.set_visible(False)
-
-        # keep title in sync even if something else changes MODE
-        ax.set_title(f"AS7343 Live Channels Ã¢â‚¬â€ Mode: {MODE}")
-        return list(bars) + pct_labels
-
-    ani = FuncAnimation(fig, update, interval=UPDATE_MS, blit=False, cache_frame_data=False)
-
+    ema_vals = None
     try:
-        plt.show()
+        while True:
+            # handle commands (non-blocking)
+            while not _cmd_q.empty():
+                cmd = _cmd_q.get()
+                if cmd == "q":
+                    raise KeyboardInterrupt
+                elif cmd == "m":
+                    MODE = {"REFLECTANCE":"ABS_TX", "ABS_TX":"ABSORBANCE", "ABSORBANCE":"REFLECTANCE"}[MODE]
+                elif cmd == "d":
+                    prev = LED_IS_ON
+                    led_set(sensor, False); LED_IS_ON = False
+                    time.sleep(DARK_LED_SETTLE_MS / 1000.0)
+                    for _ in range(DARK_FLUSH_FRAMES):
+                        _ = read_frame(sensor); time.sleep(0.01)
+                    dark_ref = read_values_stacked(sensor, SAMPLES)
+                elif cmd == "w":
+                    if USE_LED and not LED_IS_ON:
+                        led_set(sensor, True); LED_IS_ON = True
+                        time.sleep(WHITE_LED_SETTLE_MS / 1000.0)
+                    white_ref = read_values_stacked(sensor, SAMPLES)
+                elif cmd == "b":
+                    if USE_LED and not LED_IS_ON:
+                        led_set(sensor, True); LED_IS_ON = True
+                        time.sleep(WHITE_LED_SETTLE_MS / 1000.0)
+                    blank_ref = read_values_stacked(sensor, SAMPLES)
+
+            vals = read_values_stacked(sensor, SAMPLES)
+
+            # smooth raw counts to reduce flicker before transforms
+            if ema_vals is None:
+                ema_vals = vals[:]
+            else:
+                ema_vals = [ALPHA*v + (1-ALPHA)*e for v, e in zip(vals, ema_vals)]
+
+            # compute by mode
+            if MODE == "REFLECTANCE":
+                _R, pctR = compute_reflectance(ema_vals)
+                rows = list(zip(LABELS, pctR))
+            elif MODE == "ABS_TX":
+                A, pctT = compute_abs_tx(ema_vals)
+                rows = list(zip(LABELS, zip(A, pctT)))
+            else:  # ABSORBANCE (log-reflectance)
+                Astar, pctR = compute_absorbance_from_reflectance(ema_vals)
+                rows = list(zip(LABELS, zip(Astar, pctR)))
+
+            # draw
+            clear_screen()
+            print_header()
+            print_table(rows, MODE)
+
+            time.sleep(max(0.01, UPDATE_MS/1000.0))
+
+    except KeyboardInterrupt:
+        pass
     finally:
         try:
             sensor.spectral_measurement_disable()
@@ -292,6 +277,7 @@ def main():
                 except Exception: pass
         except Exception:
             pass
+        print("\nBye.")
 
 if __name__ == "__main__":
     main()
