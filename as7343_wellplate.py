@@ -60,71 +60,53 @@ def now_iso():
 # ----- Sensor init -----
 def init_sensor():
     s = qwiic_as7343.QwiicAS7343()
-    if not s.connected:
-        print("ERROR: AS7343 not detected on I2C. Check wiring and I2C address.")
+    try:
+        connected = s.is_connected()
+    except Exception:
+        connected = getattr(s, 'connected', False)
+    if not connected:
+        print("ERROR: AS7343 not detected on I2C.")
         sys.exit(2)
     if not s.begin():
         print("ERROR: AS7343 begin() failed.")
         sys.exit(3)
-    # Make a best-effort default configuration.
-    try:
-        # Not all libraries expose these; wrapped in try/except.
-        s.set_integration_time_ms(100)  # 100 ms
-    except Exception:
-        pass
-    try:
-        s.set_gain(16)  # moderate gain
-    except Exception:
-        pass
+
+    try: s.power_on()
+    except Exception: pass
+    try: s.set_auto_smux(s.kAutoSmux18Channels)
+    except Exception: pass
+    try: s.spectral_measurement_enable()
+    except Exception: pass
+
     return s
 
 # ----- Read channels with averaging -----
 def _single_read(sensor):
-    """
-    Return a list of NUM_CH raw (or calibrated) counts.
-    This function tries a few API variants seen in qwiic_as7343 examples.
-    Adjust this to match your previous working read path.
-    """
-    # Variant 1: direct spectral data dict
-    try:
-        data = sensor.get_calibrated_spectral_data()
-        # Expect keys in the sensor's order; convert to list by index.
-        # If it's a dict with fixed ordering, try to extract in the expected order.
-        if isinstance(data, dict):
-            vals = list(data.values())
-            if len(vals) >= NUM_CH:
-                return vals[:NUM_CH]
-        elif isinstance(data, (list, tuple)) and len(data) >= NUM_CH:
-            return list(data[:NUM_CH])
-    except Exception:
-        pass
+    # Update internal data registers
+    sensor.read_all_spectral_data()
 
-    # Variant 2: get_all_channels() returning list/tuple
+    # Return the 13 channels we use, mapped to your LABELS order
     try:
-        vals = sensor.get_all_channels()
-        if isinstance(vals, (list, tuple)) and len(vals) >= NUM_CH:
-            return list(vals[:NUM_CH])
-    except Exception:
-        pass
+        return [
+            float(sensor.get_data(sensor.kChPurpleF1405nm)),   # F1 (405)
+            float(sensor.get_data(sensor.kChDarkBlueF2425nm)), # F2 (425)
+            float(sensor.get_data(sensor.kChBlueFz450nm)),     # FZ (450)
+            float(sensor.get_data(sensor.kChLightBlueF3475nm)),# F3 (475)
+            float(sensor.get_data(sensor.kChBlueF4515nm)),     # F4 (515)
+            float(sensor.get_data(sensor.kChGreenF5550nm)),    # FY (550)
+            float(sensor.get_data(sensor.kChGreenFy555nm)),    # F5 (555)
+            float(sensor.get_data(sensor.kChOrangeFxl600nm)),  # FXL (600)
+            float(sensor.get_data(sensor.kChBrownF6640nm)),    # F6 (640)
+            float(sensor.get_data(sensor.kChRedF7690nm)),      # F7 (690)
+            float(sensor.get_data(sensor.kChDarkRedF8745nm)),  # F8 (745)
+            float(sensor.get_data(sensor.kChVis1)),            # VIS (broad)
+            float(sensor.get_data(sensor.kChNir855nm)),        # NIR (855)
+        ]
+    except Exception as e:
+        raise RuntimeError(
+            "AS7343 read failed. Your qwiic_as7343 version may use different channel constants."
+        ) from e
 
-    # Variant 3: read channels one by one
-    # Some libs expose .channels or methods like get_channel(n). We try a generic approach.
-    try:
-        vals = []
-        for ch in range(NUM_CH):
-            # Replace this with your per-channel accessor if available.
-            val = sensor.get_channel(ch)  # may raise AttributeError
-            vals.append(float(val))
-        if len(vals) == NUM_CH:
-            return vals
-    except Exception:
-        pass
-
-    raise RuntimeError(
-        "Could not read channels with the current qwiic_as7343 API.\n"
-        "Please edit _single_read() to use the same method you used in your previous code "
-        "(e.g., sensor.get_all_channels() or sensor.get_calibrated_spectral_data())."
-    )
 
 def read_channels(sensor, averages=DEFAULT_AVG, settle_ms=0):
     """
@@ -185,24 +167,23 @@ def pprint_vector(name, vec, idxs=None, width=10, precision=3):
     print(f"{name}: " + " | ".join(parts))
 
 def summarize(A, T):
-    # Highlight a few wavelengths user cares about (if present)
-    idx_by_label = {lbl.split()[0]: i for i, lbl in enumerate(LABELS)}  # keys like F5, FXL, F6
-    focus = []
-    for key in ["F5 (555)","FXL (600)","F6 (640)"]:
-        # match by startswith to be robust
-        found = None
-        for i, lbl in enumerate(LABELS):
-            if lbl.startswith(key.split()[0]):
-                found = i; break
-        if found is not None:
-            focus.append(found)
-    if focus:
-        pprint_vector("A (focus)", A, idxs=focus, precision=3)
-        pprint_vector("%T (focus)", T, idxs=focus, precision=1)
-    else:
-        # fallback show first few
-        pprint_vector("A", A[:5], idxs=range(5), precision=3)
-        pprint_vector("%T", T[:5], idxs=range(5), precision=1)
+    # Show every channel, neatly
+    pprint_vector("A", A, precision=3)
+    pprint_vector("%T", T, precision=1)
+
+# ----- Print helpers -----
+def print_table(I, A, T):
+    # Pretty console table: Channel | I | A | %T
+    col_w = {"ch": 14, "I": 10, "A": 10, "T": 10}
+    header = f"{'Channel':<{col_w['ch']}}{'I':>{col_w['I']}}{'A':>{col_w['A']}}{'%T':>{col_w['T']}}"
+    line = "-" * (col_w['ch'] + col_w['I'] + col_w['A'] + col_w['T'])
+    print(header)
+    print(line)
+    for i, lbl in enumerate(LABELS):
+        i_val = f"{I[i]:.1f}"
+        a_val = f"{A[i]:.3f}"
+        t_val = f"{T[i]:.1f}"
+        print(f"{lbl:<{col_w['ch']}}{i_val:>{col_w['I']}}{a_val:>{col_w['A']}}{t_val:>{col_w['T']}}")
 
 # ----- Main run -----
 def main():
@@ -285,11 +266,8 @@ def main():
                 continue
             print(f"Reading sample at {current_well} (avg {avg})...")
             I = read_channels(sensor, averages=avg, settle_ms=0)
-            A, T = compute_absorbance_and_transmittance(
-                sample=I, blank=blanks[current_well]["I0"], dark=dark, eps=EPS
-            )
-            pprint_vector("Raw I", I, precision=1)
-            summarize(A, T)
+            A, T = compute_absorbance_and_transmittance(I, blanks[current_well]["I0"], dark=dark, eps=EPS)
+            print_table(I, A, T)
 
         elif c == "live":
             hz = LIVE_DEFAULT_HZ
@@ -324,7 +302,7 @@ def main():
                     sample=I, blank=blanks[current_well]["I0"], dark=dark, eps=EPS
                 )
                 print(f"\n[{now_iso()}] {current_well}")
-                summarize(A, T)
+                print_table(I, A, T)
                 time.sleep(interval)
 
         elif c == "save":
