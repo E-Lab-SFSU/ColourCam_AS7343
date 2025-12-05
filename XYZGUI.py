@@ -16,12 +16,28 @@ def send_gcode(command):
     time.sleep(0.1)  # Initial delay for command processing
     while True:
         if ser.in_waiting > 0:  # Check if there's data waiting to be read
-            response = ser.readline().decode('utf-8').strip()
-            if "ok" in response:  # Assuming 'ok' is the acknowledgment from the printer
-                break
-            elif "error" in response:  # Handle potential error messages
-                sg.popup(f"Error from printer: {response}", title='Printer Error', keep_on_top=True)
-                break
+            try:
+                # Read raw bytes and decode with error handling
+                raw_data = ser.readline()
+                # Try UTF-8 first, fallback to latin-1 (which can decode any byte)
+                try:
+                    response = raw_data.decode('utf-8').strip()
+                except UnicodeDecodeError:
+                    # Fallback to latin-1 which can decode any byte sequence
+                    response = raw_data.decode('latin-1', errors='ignore').strip()
+                
+                # Check for acknowledgment or error
+                response_lower = response.lower()
+                if "ok" in response_lower:  # Assuming 'ok' is the acknowledgment from the printer
+                    break
+                elif "error" in response_lower:  # Handle potential error messages
+                    sg.popup(f"Error from printer: {response}", title='Printer Error', keep_on_top=True)
+                    break
+            except Exception as e:
+                # If decoding completely fails, just continue waiting
+                # Some printers send binary data that we can ignore
+                time.sleep(0.01)
+                continue
 
 
 # Initial positions
