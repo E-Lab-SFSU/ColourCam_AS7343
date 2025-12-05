@@ -290,28 +290,32 @@ def main():
         # Corner Setting
         [sg.Frame("Set Corners", [
             [sg.Text("Top-Left:"), 
-             sg.Input("0.00", size=(8, 1), key="-TL_X-", readonly=True),
-             sg.Input("0.00", size=(8, 1), key="-TL_Y-", readonly=True),
-             sg.Input("0.00", size=(8, 1), key="-TL_Z-", readonly=True),
-             sg.Button("Set Top-Left", key="-SET_TL-", disabled=True),
+             sg.Input("0.00", size=(8, 1), key="-TL_X-"),
+             sg.Input("0.00", size=(8, 1), key="-TL_Y-"),
+             sg.Input("0.00", size=(8, 1), key="-TL_Z-"),
+             sg.Button("Set from Printer", key="-SET_TL-", disabled=True),
+             sg.Button("Set from Input", key="-SET_TL_MANUAL-"),
              sg.Text("", key="-TL_STATUS-", size=(10, 1))],
             [sg.Text("Bottom-Left:"),
-             sg.Input("0.00", size=(8, 1), key="-BL_X-", readonly=True),
-             sg.Input("0.00", size=(8, 1), key="-BL_Y-", readonly=True),
-             sg.Input("0.00", size=(8, 1), key="-BL_Z-", readonly=True),
-             sg.Button("Set Bottom-Left", key="-SET_BL-", disabled=True),
+             sg.Input("0.00", size=(8, 1), key="-BL_X-"),
+             sg.Input("0.00", size=(8, 1), key="-BL_Y-"),
+             sg.Input("0.00", size=(8, 1), key="-BL_Z-"),
+             sg.Button("Set from Printer", key="-SET_BL-", disabled=True),
+             sg.Button("Set from Input", key="-SET_BL_MANUAL-"),
              sg.Text("", key="-BL_STATUS-", size=(10, 1))],
             [sg.Text("Top-Right:"),
-             sg.Input("0.00", size=(8, 1), key="-TR_X-", readonly=True),
-             sg.Input("0.00", size=(8, 1), key="-TR_Y-", readonly=True),
-             sg.Input("0.00", size=(8, 1), key="-TR_Z-", readonly=True),
-             sg.Button("Set Top-Right", key="-SET_TR-", disabled=True),
+             sg.Input("0.00", size=(8, 1), key="-TR_X-"),
+             sg.Input("0.00", size=(8, 1), key="-TR_Y-"),
+             sg.Input("0.00", size=(8, 1), key="-TR_Z-"),
+             sg.Button("Set from Printer", key="-SET_TR-", disabled=True),
+             sg.Button("Set from Input", key="-SET_TR_MANUAL-"),
              sg.Text("", key="-TR_STATUS-", size=(10, 1))],
             [sg.Text("Bottom-Right:"),
-             sg.Input("0.00", size=(8, 1), key="-BR_X-", readonly=True),
-             sg.Input("0.00", size=(8, 1), key="-BR_Y-", readonly=True),
-             sg.Input("0.00", size=(8, 1), key="-BR_Z-", readonly=True),
-             sg.Button("Set Bottom-Right", key="-SET_BR-", disabled=True),
+             sg.Input("0.00", size=(8, 1), key="-BR_X-"),
+             sg.Input("0.00", size=(8, 1), key="-BR_Y-"),
+             sg.Input("0.00", size=(8, 1), key="-BR_Z-"),
+             sg.Button("Set from Printer", key="-SET_BR-", disabled=True),
+             sg.Button("Set from Input", key="-SET_BR_MANUAL-"),
              sg.Text("", key="-BR_STATUS-", size=(10, 1))],
         ])],
         
@@ -320,7 +324,8 @@ def main():
         # Generate and Save
         [sg.Frame("Generate Path", [
             [sg.Button("Calculate Well Positions", key="-CALC_POS-", disabled=True),
-             sg.Button("Generate Snake Path", key="-GEN_SNAKE-", disabled=True)],
+             sg.Button("Generate Snake Path", key="-GEN_SNAKE-", disabled=True),
+             sg.Button("Check Corners", key="-CHECK_CORNERS-")],
             [sg.Text("Output File:"), sg.Input("well_config.json", size=(30, 1), key="-OUTPUT_FILE-"),
              sg.Button("Save Configuration", key="-SAVE-", disabled=True)],
         ])],
@@ -335,6 +340,33 @@ def main():
     ]
     
     window = sg.Window("Well Plate Location Calculator", layout, finalize=True)
+    
+    # Helper function to set corner and check if all are set
+    def set_corner(corner_name, x, y, z, status_key):
+        nonlocal corners, corners_set
+        corners[corner_name] = {"X": x, "Y": y, "Z": z}
+        corners_set[corner_name] = True
+        window[status_key].update("✓ Set")
+        
+        # Debug: print corner status
+        print(f"Set {corner_name}: {corners_set}")
+        
+        # Enable calculate button if all corners are set
+        all_set = all(corners_set.values())
+        print(f"All corners set? {all_set}, Values: {list(corners_set.values())}")
+        
+        if all_set:
+            try:
+                # Enable all three buttons at once
+                window["-CALC_POS-"].update(disabled=False)
+                window["-GEN_SNAKE-"].update(disabled=False)
+                window["-SAVE-"].update(disabled=False)
+                window.refresh()  # Force GUI update
+                print("All buttons enabled!")
+            except Exception as e:
+                print(f"Error enabling button: {e}")
+                import traceback
+                traceback.print_exc()
     
     # Event loop
     while True:
@@ -417,41 +449,103 @@ def main():
                 
                 window["-CURRENT_POS-"].update(f"Current Position: X={current_x:.2f}, Y={current_y:.2f}, Z={current_z:.2f}")
         
-        # Set corners
+        # Set corners from printer position
         elif event == "-SET_TL-" and ser:
-            corners["top_left"] = {"X": current_x, "Y": current_y, "Z": current_z}
-            corners_set["top_left"] = True
+            set_corner("top_left", current_x, current_y, current_z, "-TL_STATUS-")
             window["-TL_X-"].update(f"{current_x:.2f}")
             window["-TL_Y-"].update(f"{current_y:.2f}")
             window["-TL_Z-"].update(f"{current_z:.2f}")
-            window["-TL_STATUS-"].update("✓ Set")
         
         elif event == "-SET_BL-" and ser:
-            corners["bottom_left"] = {"X": current_x, "Y": current_y, "Z": current_z}
-            corners_set["bottom_left"] = True
+            set_corner("bottom_left", current_x, current_y, current_z, "-BL_STATUS-")
             window["-BL_X-"].update(f"{current_x:.2f}")
             window["-BL_Y-"].update(f"{current_y:.2f}")
             window["-BL_Z-"].update(f"{current_z:.2f}")
-            window["-BL_STATUS-"].update("✓ Set")
         
         elif event == "-SET_TR-" and ser:
-            corners["top_right"] = {"X": current_x, "Y": current_y, "Z": current_z}
-            corners_set["top_right"] = True
+            set_corner("top_right", current_x, current_y, current_z, "-TR_STATUS-")
             window["-TR_X-"].update(f"{current_x:.2f}")
             window["-TR_Y-"].update(f"{current_y:.2f}")
             window["-TR_Z-"].update(f"{current_z:.2f}")
-            window["-TR_STATUS-"].update("✓ Set")
         
         elif event == "-SET_BR-" and ser:
-            corners["bottom_right"] = {"X": current_x, "Y": current_y, "Z": current_z}
-            corners_set["bottom_right"] = True
+            set_corner("bottom_right", current_x, current_y, current_z, "-BR_STATUS-")
             window["-BR_X-"].update(f"{current_x:.2f}")
             window["-BR_Y-"].update(f"{current_y:.2f}")
             window["-BR_Z-"].update(f"{current_z:.2f}")
-            window["-BR_STATUS-"].update("✓ Set")
+        
+        # Set corners from manual input
+        elif event == "-SET_TL_MANUAL-":
+            try:
+                x = float(values["-TL_X-"])
+                y = float(values["-TL_Y-"])
+                z = float(values["-TL_Z-"])
+                set_corner("top_left", x, y, z, "-TL_STATUS-")
+            except ValueError:
+                sg.popup_error("Please enter valid numbers for X, Y, Z", title="Error")
+        
+        elif event == "-SET_BL_MANUAL-":
+            try:
+                x = float(values["-BL_X-"])
+                y = float(values["-BL_Y-"])
+                z = float(values["-BL_Z-"])
+                set_corner("bottom_left", x, y, z, "-BL_STATUS-")
+            except ValueError:
+                sg.popup_error("Please enter valid numbers for X, Y, Z", title="Error")
+        
+        elif event == "-SET_TR_MANUAL-":
+            try:
+                x = float(values["-TR_X-"])
+                y = float(values["-TR_Y-"])
+                z = float(values["-TR_Z-"])
+                set_corner("top_right", x, y, z, "-TR_STATUS-")
+            except ValueError:
+                sg.popup_error("Please enter valid numbers for X, Y, Z", title="Error")
+        
+        elif event == "-SET_BR_MANUAL-":
+            try:
+                x = float(values["-BR_X-"])
+                y = float(values["-BR_Y-"])
+                z = float(values["-BR_Z-"])
+                set_corner("bottom_right", x, y, z, "-BR_STATUS-")
+            except ValueError:
+                sg.popup_error("Please enter valid numbers for X, Y, Z", title="Error")
+        
+        # Check corners status (debug helper)
+        elif event == "-CHECK_CORNERS-":
+            status_msg = "Corner Status:\n"
+            for corner, is_set in corners_set.items():
+                status_msg += f"  {corner}: {'✓ Set' if is_set else '✗ Not Set'}\n"
+            status_msg += f"\nAll set? {all(corners_set.values())}\n"
+            
+            # Check button state
+            try:
+                btn_disabled = window["-CALC_POS-"].Disabled
+                status_msg += f"Calculate button disabled? {btn_disabled}\n"
+            except:
+                status_msg += "Could not check button state\n"
+            
+            sg.popup(status_msg, title="Corner Status")
+            
+            # Force enable if all are set
+            if all(corners_set.values()):
+                try:
+                    window["-CALC_POS-"].update(disabled=False)
+                    window["-GEN_SNAKE-"].update(disabled=False)
+                    window["-SAVE-"].update(disabled=False)
+                    window.refresh()
+                    sg.popup("All corners are set! Buttons should now be enabled.\nTry clicking Calculate Well Positions now.", title="Info")
+                except Exception as e:
+                    sg.popup_error(f"Error enabling buttons: {str(e)}", title="Error")
         
         # Calculate well positions
         elif event == "-CALC_POS-":
+            # Double-check corners are set
+            if not all(corners_set.values()):
+                missing = [k.replace("_", " ").title() for k, v in corners_set.items() if not v]
+                sg.popup_error(f"Please set all 4 corners first.\nMissing: {', '.join(missing)}", title="Error")
+                continue
+            
             try:
                 num_rows = int(values["-ROWS-"])
                 num_cols = int(values["-COLS-"])
@@ -459,27 +553,27 @@ def main():
                 sg.popup_error("Invalid rows/columns. Please enter numbers.", title="Error")
                 continue
             
-            if not all(corners_set.values()):
-                sg.popup_error("Please set all 4 corners first.", title="Error")
-                continue
-            
-            well_positions = calculate_well_positions(
-                corners["top_left"],
-                corners["bottom_left"],
-                corners["top_right"],
-                corners["bottom_right"],
-                num_rows,
-                num_cols
-            )
-            
-            # Display results
-            result_text = f"Calculated {len(well_positions)} well positions:\n\n"
-            for well, pos in well_positions.items():
-                result_text += f"{well}: X={pos['X']:.2f}, Y={pos['Y']:.2f}, Z={pos['Z']:.2f}\n"
-            
-            window["-RESULTS-"].update(result_text)
-            window["-GEN_SNAKE-"].update(disabled=False)
-            window["-SAVE-"].update(disabled=False)
+            try:
+                well_positions = calculate_well_positions(
+                    corners["top_left"],
+                    corners["bottom_left"],
+                    corners["top_right"],
+                    corners["bottom_right"],
+                    num_rows,
+                    num_cols
+                )
+                
+                # Display results
+                result_text = f"Calculated {len(well_positions)} well positions:\n\n"
+                for well, pos in well_positions.items():
+                    result_text += f"{well}: X={pos['X']:.2f}, Y={pos['Y']:.2f}, Z={pos['Z']:.2f}\n"
+                
+                window["-RESULTS-"].update(result_text)
+                window["-GEN_SNAKE-"].update(disabled=False)
+                window["-SAVE-"].update(disabled=False)
+                sg.popup(f"Successfully calculated {len(well_positions)} well positions!", title="Success")
+            except Exception as e:
+                sg.popup_error(f"Error calculating positions:\n{str(e)}", title="Error")
         
         # Generate snake path
         elif event == "-GEN_SNAKE-":
@@ -527,32 +621,32 @@ def main():
                 sg.popup_error("Please set all corners first.", title="Error")
                 continue
             
-            well_positions = calculate_well_positions(
-                corners["top_left"],
-                corners["bottom_left"],
-                corners["top_right"],
-                corners["bottom_right"],
-                num_rows,
-                num_cols
-            )
-            
-            snake_path = generate_snake_path(num_rows, num_cols)
-            
-            output_file = values["-OUTPUT_FILE-"] or "well_config.json"
-            
-            config = {
-                "timestamp": datetime.now().isoformat(),
-                "num_rows": num_rows,
-                "num_cols": num_cols,
-                "top_left": corners["top_left"],
-                "bottom_left": corners["bottom_left"],
-                "top_right": corners["top_right"],
-                "bottom_right": corners["bottom_right"],
-                "well_positions": well_positions,
-                "snake_path": snake_path
-            }
-            
             try:
+                well_positions = calculate_well_positions(
+                    corners["top_left"],
+                    corners["bottom_left"],
+                    corners["top_right"],
+                    corners["bottom_right"],
+                    num_rows,
+                    num_cols
+                )
+                
+                snake_path = generate_snake_path(num_rows, num_cols)
+                
+                output_file = values["-OUTPUT_FILE-"] or "well_config.json"
+                
+                config = {
+                    "timestamp": datetime.now().isoformat(),
+                    "num_rows": num_rows,
+                    "num_cols": num_cols,
+                    "top_left": corners["top_left"],
+                    "bottom_left": corners["bottom_left"],
+                    "top_right": corners["top_right"],
+                    "bottom_right": corners["bottom_right"],
+                    "well_positions": well_positions,
+                    "snake_path": snake_path
+                }
+                
                 with open(output_file, 'w') as f:
                     json.dump(config, f, indent=2)
                 sg.popup(f"Configuration saved to:\n{output_file}", title="Success")
