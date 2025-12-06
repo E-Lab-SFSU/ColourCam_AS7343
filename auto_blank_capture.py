@@ -406,7 +406,9 @@ def move_to_position(ser, x, y, z, feedrate=3000):
     command = f"G1 X{x:.2f} Y{y:.2f} Z{z:.2f} F{feedrate}"
     print(f"Moving to: X={x:.2f}, Y={y:.2f}, Z={z:.2f}")
     send_gcode(ser, command)
-    time.sleep(0.5)  # Additional settle time after movement
+    # Note: settle_time is applied after this function returns, not here
+    # This small delay is just to ensure the command is fully processed
+    time.sleep(0.1)
 
 
 # ===== Main Automation =====
@@ -538,6 +540,9 @@ def capture_blanks_automated(config_file=None, num_rows=None, num_cols=None,
     print("Starting automated blank capture...")
     print("=" * 60)
     
+    # Track previous position to detect row vs column changes
+    prev_pos = None
+    
     for i, well in enumerate(wells, 1):
         # Check for stop flag from GUI
         if gui_stop_flag and gui_stop_flag.get('stop', False):
@@ -559,6 +564,17 @@ def capture_blanks_automated(config_file=None, num_rows=None, num_cols=None,
         pos = well_positions[well]
         print(f"  Position: X={pos['X']:.2f}, Y={pos['Y']:.2f}, Z={pos['Z']:.2f}")
         
+        # Detect if this is a row change (Y changes) or column change (X changes)
+        is_row_change = False
+        is_column_change = False
+        if prev_pos:
+            # Check if Y changed significantly (row change)
+            if abs(pos['Y'] - prev_pos['Y']) > 0.1:
+                is_row_change = True
+            # Check if X changed significantly (column change)
+            if abs(pos['X'] - prev_pos['X']) > 0.1:
+                is_column_change = True
+        
         # Update GUI status and current well
         if gui_window:
             if gui_status_key:
@@ -573,11 +589,22 @@ def capture_blanks_automated(config_file=None, num_rows=None, num_cols=None,
         # Move printer to well position
         if not use_dummy_printer and ser:
             move_to_position(ser, pos['X'], pos['Y'], pos['Z'])
-            print(f"  Waiting {settle_time}s for settling...")
+            
+            # Always apply settle time, with indication of movement type
+            if is_row_change:
+                print(f"  Row change detected - Waiting {settle_time}s for settling...")
+            elif is_column_change:
+                print(f"  Column change detected - Waiting {settle_time}s for settling...")
+            else:
+                print(f"  Waiting {settle_time}s for settling...")
+            
             time.sleep(settle_time)
         else:
             print("  [DUMMY MODE] Skipping printer movement")
             time.sleep(0.5)  # Small delay even in dummy mode
+        
+        # Update previous position for next iteration
+        prev_pos = pos.copy()
         
         # Capture blank
         print(f"  Capturing blank (averaging {DEFAULT_AVG} reads)...")
