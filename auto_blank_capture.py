@@ -402,75 +402,6 @@ def send_gcode(ser, command):
         time.sleep(0.01)  # Small delay to avoid busy waiting
 
 
-def wait_for_movement_complete(ser, target_x, target_y, target_z, timeout=30.0, tolerance=0.1):
-    """
-    Wait for printer to actually reach the target position.
-    Uses M114 to check current position and waits until it matches target.
-    
-    Args:
-        ser: serial.Serial object
-        target_x, target_y, target_z: target coordinates
-        timeout: maximum time to wait (seconds)
-        tolerance: position tolerance in mm
-    
-    Returns:
-        True if position reached, False if timeout
-    """
-    start_time = time.time()
-    max_attempts = int(timeout / 0.5)  # Check every 0.5 seconds
-    
-    for attempt in range(max_attempts):
-        if time.time() - start_time > timeout:
-            print(f"  Warning: Movement timeout after {timeout}s")
-            return False
-        
-        # Send M114 to get current position
-        ser.write(b'M114\n')
-        time.sleep(0.2)
-        
-        # Read response
-        position = {"X": None, "Y": None, "Z": None}
-        read_timeout = time.time() + 1.0
-        
-        while time.time() < read_timeout:
-            if ser.in_waiting > 0:
-                try:
-                    raw_data = ser.readline()
-                    try:
-                        response = raw_data.decode('utf-8').strip()
-                    except UnicodeDecodeError:
-                        response = raw_data.decode('latin-1', errors='ignore').strip()
-                    
-                    # Parse M114 response: "X:100.00 Y:200.00 Z:50.00 E:0.00 Count X:0 Y:0 Z:0"
-                    if "X:" in response:
-                        parts = response.split()
-                        for part in parts:
-                            if part.startswith("X:"):
-                                position["X"] = float(part[2:])
-                            elif part.startswith("Y:"):
-                                position["Y"] = float(part[2:])
-                            elif part.startswith("Z:"):
-                                position["Z"] = float(part[2:])
-                        
-                        if all(v is not None for v in position.values()):
-                            # Check if we're close enough to target
-                            x_diff = abs(position["X"] - target_x)
-                            y_diff = abs(position["Y"] - target_y)
-                            z_diff = abs(position["Z"] - target_z)
-                            
-                            if x_diff <= tolerance and y_diff <= tolerance and z_diff <= tolerance:
-                                return True
-                            break
-                except Exception:
-                    continue
-            time.sleep(0.01)
-        
-        # Wait a bit before next check
-        time.sleep(0.3)
-    
-    return False
-
-
 def move_to_position(ser, x, y, z, feedrate=3000, wait_for_complete=True):
     """
     Move printer to specified X, Y, Z position and wait for movement to complete.
@@ -479,18 +410,16 @@ def move_to_position(ser, x, y, z, feedrate=3000, wait_for_complete=True):
         ser: serial.Serial object
         x, y, z: target coordinates
         feedrate: movement speed (mm/min)
-        wait_for_complete: If True, wait for printer to actually reach position
+        wait_for_complete: If True, wait for printer to actually reach position using M400
     """
     command = f"G1 X{x:.2f} Y{y:.2f} Z{z:.2f} F{feedrate}"
     print(f"Moving to: X={x:.2f}, Y={y:.2f}, Z={z:.2f}")
     send_gcode(ser, command)  # This waits for "ok" (command queued)
     
-    # Now wait for the actual movement to complete
+    # Now wait for the actual movement to complete using M400
+    # M400 waits for all moves in the queue to complete before sending "ok"
     if wait_for_complete:
-        # Calculate estimated movement time based on distance and feedrate
-        # This gives us a reasonable timeout
-        # For now, use a fixed timeout - could be improved with distance calculation
-        wait_for_movement_complete(ser, x, y, z, timeout=30.0, tolerance=0.1)
+        send_gcode(ser, "M400")  # Wait for all moves to complete
 
 
 # ===== Main Automation =====
