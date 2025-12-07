@@ -797,40 +797,84 @@ def gui_main():
                 window["-STATUS-"].update("Waiting for dark reference capture...")
                 window.refresh()
                 
-                # Create a custom modal popup window for dark reference
-                popup_layout = [
-                    [sg.Text("Please cover the sensor, then click 'Capture' to capture dark reference.", 
-                            size=(50, 3), justification='center')],
-                    [sg.Button("Capture", key="-CAPTURE-", size=(10, 1), button_color=("white", "green")),
-                     sg.Button("Skip", key="-SKIP-", size=(10, 1), button_color=("white", "orange"))]
-                ]
-                popup_window = sg.Window("Dark Reference", popup_layout, modal=True, keep_on_top=True, finalize=True)
+                # Print to console for Pi users
+                print("\n" + "="*60)
+                print("DARK REFERENCE CAPTURE")
+                print("="*60)
+                print("Please cover the sensor, then click 'Capture' in the popup window.")
+                print("Or close the popup to skip dark reference capture.")
+                print("="*60 + "\n")
                 
-                # Blocking read for the popup window
+                # Create a custom modal popup window for dark reference
+                # Use larger buttons and simpler layout for better Pi compatibility
+                popup_layout = [
+                    [sg.Text("DARK REFERENCE CAPTURE", font=("Helvetica", 12, "bold"), justification='center')],
+                    [sg.Text("Please cover the sensor, then click 'Capture'", 
+                            size=(45, 2), justification='center')],
+                    [sg.Text("")],  # Spacer
+                    [sg.Button("Capture", key="-CAPTURE-", size=(15, 2), button_color=("white", "green"), font=("Helvetica", 11, "bold"))],
+                    [sg.Text("")],  # Spacer
+                    [sg.Button("Skip", key="-SKIP-", size=(15, 2), button_color=("white", "orange"), font=("Helvetica", 11))],
+                ]
+                popup_window = sg.Window("Dark Reference", popup_layout, modal=True, keep_on_top=True, 
+                                        finalize=True, location=(None, None), grab_anywhere=False)
+                
+                # Bring window to front (helps on Pi)
+                try:
+                    popup_window.bring_to_front()
+                except:
+                    pass
+                
+                # Blocking read for the popup window with timeout to prevent hanging
                 popup_response = None
-                while True:
-                    popup_event, popup_values = popup_window.read()
+                timeout_count = 0
+                max_timeout = 600  # 60 seconds max wait (600 * 100ms)
+                
+                while timeout_count < max_timeout:
+                    popup_event, popup_values = popup_window.read(timeout=100)
                     if popup_event == sg.WIN_CLOSED or popup_event == "-SKIP-":
                         popup_response = "Skip"
+                        print("Dark reference capture SKIPPED by user.")
                         break
                     elif popup_event == "-CAPTURE-":
                         popup_response = "Capture"
                         break
+                    elif popup_event == sg.TIMEOUT_KEY:
+                        timeout_count += 1
+                        # Refresh window periodically to keep it responsive
+                        if timeout_count % 10 == 0:
+                            popup_window.refresh()
+                        continue
                 
                 popup_window.close()
                 
                 if popup_response == "Capture":
                     window["-STATUS-"].update("Capturing dark reference...")
                     window.refresh()
+                    print("Capturing dark reference...")
+                    
                     # Initialize sensor temporarily for dark capture
                     from as7343_wellplate import init_sensor, read_channels
                     temp_sensor = init_sensor()
                     dark_ref = read_channels(temp_sensor, averages=DEFAULT_AVG, settle_ms=0)
+                    
+                    # Print confirmation with values
+                    print("\n" + "="*60)
+                    print("DARK REFERENCE CAPTURED SUCCESSFULLY")
+                    print("="*60)
+                    print(f"Channel values:")
+                    for channel, value in dark_ref.items():
+                        print(f"  {channel}: {value}")
+                    print("="*60)
+                    print("Dark reference will be used for all well measurements.")
+                    print("="*60 + "\n")
+                    
                     window["-STATUS-"].update("Dark reference captured. Starting well capture...")
                     window.refresh()
                 else:
                     # User skipped dark reference, but continue with capture
                     dark_ref = None
+                    print("Continuing without dark reference...\n")
             
             # Disable start button, enable stop button
             window["-START-"].update(disabled=True)
