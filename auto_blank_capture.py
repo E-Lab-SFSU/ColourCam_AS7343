@@ -796,9 +796,30 @@ def gui_main():
             if capture_dark:
                 window["-STATUS-"].update("Waiting for dark reference capture...")
                 window.refresh()
-                response = sg.popup_yes_no("Please cover the sensor, then click Yes to capture dark reference.", 
-                                           title="Dark Reference", keep_on_top=True)
-                if response == "Yes":
+                
+                # Create a custom modal popup window for dark reference
+                popup_layout = [
+                    [sg.Text("Please cover the sensor, then click 'Capture' to capture dark reference.", 
+                            size=(50, 3), justification='center')],
+                    [sg.Button("Capture", key="-CAPTURE-", size=(10, 1), button_color=("white", "green")),
+                     sg.Button("Skip", key="-SKIP-", size=(10, 1), button_color=("white", "orange"))]
+                ]
+                popup_window = sg.Window("Dark Reference", popup_layout, modal=True, keep_on_top=True, finalize=True)
+                
+                # Blocking read for the popup window
+                popup_response = None
+                while True:
+                    popup_event, popup_values = popup_window.read()
+                    if popup_event == sg.WIN_CLOSED or popup_event == "-SKIP-":
+                        popup_response = "Skip"
+                        break
+                    elif popup_event == "-CAPTURE-":
+                        popup_response = "Capture"
+                        break
+                
+                popup_window.close()
+                
+                if popup_response == "Capture":
                     window["-STATUS-"].update("Capturing dark reference...")
                     window.refresh()
                     # Initialize sensor temporarily for dark capture
@@ -808,7 +829,7 @@ def gui_main():
                     window["-STATUS-"].update("Dark reference captured. Starting well capture...")
                     window.refresh()
                 else:
-                    # User cancelled dark reference, but continue with capture
+                    # User skipped dark reference, but continue with capture
                     dark_ref = None
             
             # Disable start button, enable stop button
