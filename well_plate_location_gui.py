@@ -324,8 +324,7 @@ def main():
         # Generate and Save
         [sg.Frame("Generate Path", [
             [sg.Button("Calculate Well Positions", key="-CALC_POS-", disabled=True),
-             sg.Button("Generate Snake Path", key="-GEN_SNAKE-", disabled=True),
-             sg.Button("Check Corners", key="-CHECK_CORNERS-")],
+             sg.Button("Generate Snake Path", key="-GEN_SNAKE-", disabled=True)],
             [sg.Text("Output File:"), sg.Input("well_config.json", size=(30, 1), key="-OUTPUT_FILE-"),
              sg.Button("Save Configuration", key="-SAVE-", disabled=True)],
         ])],
@@ -510,33 +509,6 @@ def main():
                 set_corner("bottom_right", x, y, z, "-BR_STATUS-")
             except ValueError:
                 sg.popup_error("Please enter valid numbers for X, Y, Z", title="Error")
-        
-        # Check corners status (debug helper)
-        elif event == "-CHECK_CORNERS-":
-            status_msg = "Corner Status:\n"
-            for corner, is_set in corners_set.items():
-                status_msg += f"  {corner}: {'✓ Set' if is_set else '✗ Not Set'}\n"
-            status_msg += f"\nAll set? {all(corners_set.values())}\n"
-            
-            # Check button state
-            try:
-                btn_disabled = window["-CALC_POS-"].Disabled
-                status_msg += f"Calculate button disabled? {btn_disabled}\n"
-            except:
-                status_msg += "Could not check button state\n"
-            
-            sg.popup(status_msg, title="Corner Status")
-            
-            # Force enable if all are set
-            if all(corners_set.values()):
-                try:
-                    window["-CALC_POS-"].update(disabled=False)
-                    window["-GEN_SNAKE-"].update(disabled=False)
-                    window["-SAVE-"].update(disabled=False)
-                    window.refresh()
-                    sg.popup("All corners are set! Buttons should now be enabled.\nTry clicking Calculate Well Positions now.", title="Info")
-                except Exception as e:
-                    sg.popup_error(f"Error enabling buttons: {str(e)}", title="Error")
         
         # Calculate well positions
         elif event == "-CALC_POS-":
