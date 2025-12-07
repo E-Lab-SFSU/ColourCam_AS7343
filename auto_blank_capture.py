@@ -854,7 +854,7 @@ def gui_main():
                     print("Capturing dark reference...")
                     
                     # Initialize sensor temporarily for dark capture
-                    from as7343_wellplate import init_sensor, read_channels
+                    from as7343_wellplate import init_sensor, read_channels, LABELS
                     temp_sensor = init_sensor()
                     dark_ref = read_channels(temp_sensor, averages=DEFAULT_AVG, settle_ms=0)
                     
@@ -863,8 +863,8 @@ def gui_main():
                     print("DARK REFERENCE CAPTURED SUCCESSFULLY")
                     print("="*60)
                     print(f"Channel values:")
-                    for channel, value in dark_ref.items():
-                        print(f"  {channel}: {value}")
+                    for i, (label, value) in enumerate(zip(LABELS, dark_ref)):
+                        print(f"  {label}: {value:.2f}")
                     print("="*60)
                     print("Dark reference will be used for all well measurements.")
                     print("="*60 + "\n")
